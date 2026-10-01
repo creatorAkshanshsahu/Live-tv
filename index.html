@@ -1,0 +1,242 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Live TV V1</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;background:#080a0e;color:#fff;font-family:Arial,Helvetica,sans-serif}
+body{overflow:hidden}
+button,input{font-family:inherit}
+#app{height:100%;display:flex;flex-direction:column}
+#header{height:72px;display:flex;align-items:center;padding:0 22px;background:#11151c;border-bottom:1px solid #252c36}
+.logo{font-size:25px;font-weight:bold;letter-spacing:.5px;white-space:nowrap}
+#search{margin-left:auto;width:290px;height:42px;padding:0 13px;border:1px solid #39414d;border-radius:7px;background:#1b2028;color:#fff;font-size:17px;outline:none}
+#search:focus{border-color:#6d9cff;box-shadow:0 0 0 2px rgba(109,156,255,.25)}
+#refresh{height:42px;margin-left:8px;padding:0 15px;border:0;border-radius:7px;background:#2d69d9;color:#fff;font-size:15px}
+#status{height:36px;padding:8px 22px;color:#aeb7c5;background:#0d1015;font-size:14px}
+#main{flex:1;display:flex;min-height:0}
+#sidebar{width:185px;background:#0e1218;border-right:1px solid #252c36;padding:13px 10px;overflow:hidden}
+.sidebtn{display:block;width:100%;height:45px;margin-bottom:7px;border:0;border-radius:7px;background:#171c24;color:#cbd2dd;text-align:left;padding:0 13px;font-size:15px}
+.sidebtn:focus,.sidebtn.active{background:#274879;color:#fff;outline:2px solid #6796ee}
+#content{flex:1;min-width:0;overflow:auto;padding:13px}
+#grid{display:grid;grid-template-columns:repeat(5,minmax(140px,1fr));gap:10px}
+.card{min-height:82px;padding:12px;background:#171c24;border:1px solid #28303b;border-radius:8px;outline:none;cursor:pointer;color:#fff}
+.card:focus,.card:hover{background:#263b61;border-color:#6c9bf1;box-shadow:0 0 0 2px rgba(108,155,241,.28)}
+.card .name{font-size:17px;font-weight:bold;line-height:1.2}
+.card .meta{font-size:12px;color:#8f99a8;margin-top:8px}
+#empty{padding:30px;text-align:center;color:#8e98a7}
+#player{position:fixed;inset:0;background:#000;display:none;z-index:20}
+#videoWrap{position:absolute;inset:0;background:#000;display:flex;align-items:center;justify-content:center}
+#video{width:100%;height:100%;background:#000}
+#playerTop{position:absolute;top:0;left:0;right:0;height:64px;padding:12px 18px;background:linear-gradient(#000b,transparent);z-index:2;display:flex;align-items:center}
+#channelTitle{font-size:20px;font-weight:bold}
+#back{margin-left:auto;padding:10px 15px;border:0;border-radius:6px;background:#202630;color:#fff;font-size:15px}
+#playerMsg{position:absolute;left:20px;bottom:22px;right:20px;padding:10px;border-radius:6px;background:#000a;color:#cfd6df;font-size:14px;z-index:2}
+@media(max-width:900px){#grid{grid-template-columns:repeat(4,minmax(130px,1fr))}#sidebar{width:150px}}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="header">
+    <div class="logo">LIVE TV</div>
+    <input id="search" placeholder="Search channels" autocomplete="off">
+    <button id="refresh">REFRESH</button>
+  </div>
+  <div id="status">Loading V1 channel catalogue...</div>
+  <div id="main">
+    <div id="sidebar">
+      <button class="sidebtn active" data-filter="all">ALL CHANNELS</button>
+      <button class="sidebtn" data-filter="favorites">FAVORITES</button>
+      <button class="sidebtn" data-filter="recent">RECENT</button>
+    </div>
+    <div id="content"><div id="grid"></div><div id="empty" style="display:none">No channels found.</div></div>
+  </div>
+</div>
+
+<div id="player">
+  <div id="videoWrap"><video id="video" controls autoplay playsinline></video></div>
+  <div id="playerTop">
+    <div id="channelTitle"></div>
+    <button id="back">BACK TO CHANNELS</button>
+  </div>
+  <div id="playerMsg">Loading stream...</div>
+</div>
+
+<!-- DASH player. The page also tries the native MPD URL if a WebView exposes DASH directly. -->
+<script src="https://cdn.dashjs.org/v4.7.4/dash.all.min.js"></script>
+<script>
+/* Old-WebView-friendly application code. No React, modules, fetch(), or framework. */
+(function(){
+var API="https://livetgtv.lovable.app/api/public/channels";
+var grid=document.getElementById("grid");
+var empty=document.getElementById("empty");
+var status=document.getElementById("status");
+var search=document.getElementById("search");
+var player=document.getElementById("player");
+var video=document.getElementById("video");
+var title=document.getElementById("channelTitle");
+var msg=document.getElementById("playerMsg");
+var currentFilter="all";
+var channels=[];
+var favorites=readList("ltv_fav");
+var recent=readList("ltv_recent");
+var dash=null;
+
+function readList(k){try{return JSON.parse(localStorage.getItem(k)||"[]");}catch(e){return [];}}
+function saveList(k,a){try{localStorage.setItem(k,JSON.stringify(a));}catch(e){}}
+function setStatus(s){status.innerHTML=s;}
+function escapeHtml(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
+function request(url,ok,fail){
+  var x=new XMLHttpRequest();
+  x.open("GET",url,true);
+  x.onreadystatechange=function(){
+    if(x.readyState!==4)return;
+    if(x.status>=200&&x.status<300)ok(x.responseText);
+    else fail("HTTP "+x.status);
+  };
+  try{x.send(null);}catch(e){fail(e.message||"Network error");}
+}
+function arrFrom(root){
+  if(Object.prototype.toString.call(root)==="[object Array]")return root;
+  if(!root||typeof root!=="object")return [];
+  var ks=["channels","results","data","items","records"];
+  var i;
+  for(i=0;i<ks.length;i++)if(Object.prototype.toString.call(root[ks[i]])==="[object Array]")return root[ks[i]];
+  if(root.id||root.channel_id)return [root];
+  return [];
+}
+function normalize(o,i){
+  var id=o.id||o.channel_id||o.channelId||o.uuid||"";
+  var name=o.name||o.title||o.channel_name||o.display_name||("Channel "+(i+1));
+  var group=o.category||o.genre||o.group||o.group_title||"";
+  return {id:String(id),name:String(name),group:String(group)};
+}
+function loadCatalogue(){
+  setStatus("Loading V1 channel catalogue...");
+  request(API,function(txt){
+    var data;
+    try{data=JSON.parse(txt);}catch(e){setStatus("V1 returned data the old browser could not parse.");return;}
+    var raw=arrFrom(data), i, c, seen={}, out=[];
+    for(i=0;i<raw.length;i++){
+      c=normalize(raw[i],i);
+      if(c.id&&!seen[c.id]){seen[c.id]=1;out.push(c);}
+    }
+    channels=out;
+    try{localStorage.setItem("ltv_channels",JSON.stringify(channels));}catch(e){}
+    setStatus(channels.length+" channels • V1");
+    render();
+  },function(e){
+    var cached=[];
+    try{cached=JSON.parse(localStorage.getItem("ltv_channels")||"[]");}catch(x){}
+    if(cached.length){channels=cached;setStatus(channels.length+" cached channels • V1 (offline catalogue)");render();}
+    else setStatus("Could not load V1 catalogue: "+e);
+  });
+}
+function idsToChannels(ids){
+  var out=[],i,j;
+  for(i=0;i<ids.length;i++)for(j=0;j<channels.length;j++)if(channels[j].id===ids[i])out.push(channels[j]);
+  return out;
+}
+function isFav(id){return favorites.indexOf(id)>=0;}
+function toggleFav(id){
+  var i=favorites.indexOf(id);
+  if(i>=0)favorites.splice(i,1);else favorites.push(id);
+  saveList("ltv_fav",favorites);render();
+}
+function addRecent(id){
+  var a=[id],i;
+  for(i=0;i<recent.length;i++)if(recent[i]!==id)a.push(recent[i]);
+  recent=a.slice(0,30);saveList("ltv_recent",recent);
+}
+function filtered(){
+  var q=(search.value||"").toLowerCase(),base=[],i,c;
+  if(currentFilter==="favorites")base=idsToChannels(favorites);
+  else if(currentFilter==="recent")base=idsToChannels(recent);
+  else base=channels.slice(0);
+  if(!q)return base;
+  var out=[];
+  for(i=0;i<base.length;i++){c=base[i];if(c.name.toLowerCase().indexOf(q)>=0||c.group.toLowerCase().indexOf(q)>=0)out.push(c);}
+  return out;
+}
+function render(){
+  grid.innerHTML="";
+  var list=filtered(),i,c,b,star;
+  empty.style.display=list.length?"none":"block";
+  for(i=0;i<list.length;i++){
+    c=list[i];b=document.createElement("div");b.className="card";b.tabIndex=0;
+    star=isFav(c.id)?" ★":"";
+    b.innerHTML='<div class="name">'+escapeHtml(c.name)+star+'</div><div class="meta">'+escapeHtml(c.group||"Live channel")+'</div>';
+    b.onclick=(function(ch){return function(){playChannel(ch);};})(c);
+    b.onkeydown=(function(ch){return function(e){
+      if(e.keyCode===13||e.keyCode===32){playChannel(ch);e.preventDefault();}
+      if(e.keyCode===70){toggleFav(ch.id);e.preventDefault();}
+    };})(c);
+    b.oncontextmenu=(function(ch){return function(e){toggleFav(ch.id);e.preventDefault();};})(c);
+    grid.appendChild(b);
+  }
+  if(grid.firstChild)grid.firstChild.focus();
+}
+function findStream(o){
+  var keys=["manifest","mpd","manifest_url","playable","url","stream_url","streamUrl"],i,k,r;
+  if(!o)return null;
+  if(typeof o==="string"&&(/\.mpd(\?|$)/i.test(o)||/^https?:/i.test(o)))return o;
+  if(Object.prototype.toString.call(o)==="[object Array]"){
+    for(i=0;i<o.length;i++){r=findStream(o[i]);if(r)return r;}
+  }else if(typeof o==="object"){
+    for(i=0;i<keys.length;i++){k=keys[i];if(typeof o[k]==="string"&&o[k].length>8)return o[k];}
+    for(k in o)if(o.hasOwnProperty(k)){r=findStream(o[k]);if(r)return r;}
+  }
+  return null;
+}
+function playChannel(c){
+  setStatus("Resolving "+c.name+"...");
+  request(API+"/"+encodeURIComponent(c.id),function(txt){
+    var data,url;
+    try{data=JSON.parse(txt);}catch(e){setStatus("Could not parse V1 stream response.");return;}
+    url=findStream(data);
+    if(!url){setStatus("V1 did not return a playable manifest for "+escapeHtml(c.name));return;}
+    addRecent(c.id);openPlayer(url,c.name);
+  },function(e){setStatus("V1 stream error: "+e);});
+}
+function openPlayer(url,name){
+  player.style.display="block";title.innerHTML=escapeHtml(name);msg.innerHTML="Loading "+escapeHtml(name)+"...";
+  if(dash){try{dash.reset();}catch(e){}dash=null;}
+  video.pause();video.removeAttribute("src");video.load();
+  /* Prefer dash.js for MPD. If unavailable, try the URL directly. */
+  if(window.dashjs&&dashjs.MediaPlayer){
+    try{
+      dash=dashjs.MediaPlayer().create();
+      dash.initialize(video,url,true);
+      dash.on(dashjs.MediaPlayer.events.STREAM_INITIALIZED,function(){msg.innerHTML="Playing";});
+      dash.on(dashjs.MediaPlayer.events.ERROR,function(){msg.innerHTML="Playback error. This WebView may not support MPEG-DASH.";});
+      return;
+    }catch(e){}
+  }
+  video.src=url;video.load();
+  var p=video.play();if(p&&p.catch)p.catch(function(){});
+}
+function closePlayer(){
+  if(dash){try{dash.reset();}catch(e){}dash=null;}
+  video.pause();video.removeAttribute("src");video.load();player.style.display="none";
+  render();
+}
+document.getElementById("back").onclick=closePlayer;
+document.getElementById("refresh").onclick=loadCatalogue;
+search.oninput=function(){render();};
+search.onkeydown=function(e){if(e.keyCode===13){render();if(grid.firstChild)grid.firstChild.focus();}};
+var side=document.getElementsByClassName("sidebtn"),i;
+for(i=0;i<side.length;i++)side[i].onclick=function(){
+  var j;for(j=0;j<side.length;j++)side[j].className="sidebtn";
+  this.className="sidebtn active";currentFilter=this.getAttribute("data-filter");render();
+};
+document.onkeydown=function(e){
+  if(player.style.display==="block"&&e.keyCode===27){closePlayer();return;}
+  if(player.style.display==="block"&&e.keyCode===4){closePlayer();return;}
+};
+loadCatalogue();
+})();
+</script>
+</body>
+</html>
