@@ -1,0 +1,186 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Live TV Lite</title>
+<style>
+html,body{margin:0;padding:0;background:#101114;color:#fff;font-family:Arial,sans-serif}
+body{font-size:18px}
+#top{padding:14px;background:#181a1f;position:sticky;top:0}
+#q{width:60%;max-width:600px;padding:12px;font-size:20px;border:1px solid #555;border-radius:5px;background:#252830;color:#fff}
+button{padding:12px 18px;margin-left:6px;font-size:18px;border:0;border-radius:5px;background:#2d7ff9;color:#fff}
+#status{padding:10px;color:#bbb}
+#list{padding:10px}
+.channel{display:inline-block;vertical-align:top;width:210px;min-height:65px;margin:6px;padding:14px;background:#1d2026;border-radius:6px;box-sizing:border-box;cursor:pointer}
+.channel:focus,.channel:hover{outline:2px solid #2d7ff9;background:#272b33}
+#playerbox{display:none;background:#000;padding:8px}
+#video{width:100%;height:auto;max-height:70vh;background:#000}
+#close{margin:8px 0}
+#manual{padding:10px;border-top:1px solid #333}
+#url{width:75%;padding:10px;background:#222;color:#fff;border:1px solid #555}
+.small{font-size:14px;color:#999}
+</style>
+</head>
+<body>
+<div id="top">
+  <input id="q" type="text" value="abc" placeholder="Search channel">
+  <button onclick="searchChannels()">SEARCH</button>
+  <button onclick="showManual()">PLAY URL</button>
+</div>
+
+<div id="status">Ready.</div>
+<div id="playerbox">
+  <button id="close" onclick="closePlayer()">BACK TO CHANNELS</button>
+  <video id="video" controls autoplay playsinline></video>
+  <div id="playstatus" class="small"></div>
+</div>
+
+<div id="list"></div>
+
+<div id="manual" style="display:none">
+  <div>Paste an HLS .m3u8 URL:</div>
+  <input id="url" type="text" placeholder="https://...m3u8">
+  <button onclick="playManual()">PLAY</button>
+</div>
+
+<script>
+/* Deliberately ES5-style JavaScript for older Android WebView. */
+var API = "https://livetgtv.lovable.app/api/public/v2/channels";
+var list = document.getElementById("list");
+var statusBox = document.getElementById("status");
+var playerBox = document.getElementById("playerbox");
+var video = document.getElementById("video");
+
+function setStatus(s){ statusBox.innerHTML = s; }
+
+function request(url, ok, fail){
+  var x = new XMLHttpRequest();
+  x.open("GET", url, true);
+  x.onreadystatechange = function(){
+    if(x.readyState !== 4) return;
+    if(x.status >= 200 && x.status < 300){
+      ok(x.responseText);
+    } else {
+      fail("HTTP " + x.status);
+    }
+  };
+  try { x.send(null); } catch(e) { fail(e.message || "Network error"); }
+}
+
+function searchChannels(){
+  var q = document.getElementById("q").value;
+  if(!q){ setStatus("Type a channel name."); return; }
+  list.innerHTML = "";
+  setStatus("Searching...");
+  request(API + "?q=" + encodeURIComponent(q), function(txt){
+    var data;
+    try { data = JSON.parse(txt); } catch(e) {
+      setStatus("The API returned invalid JSON.");
+      return;
+    }
+    renderChannels(data);
+  }, function(e){
+    setStatus("API error: " + e + ". If this box blocks API requests, use PLAY URL below.");
+  });
+}
+
+function renderChannels(data){
+  var channels = data.channels || data.results || data.data || [];
+  if(Object.prototype.toString.call(channels) !== "[object Array]"){
+    if(data.id || data.channel_id) channels = [data];
+    else channels = [];
+  }
+  if(!channels.length){
+    setStatus("No channels found.");
+    return;
+  }
+  setStatus(channels.length + " channel(s) found.");
+  var i, c, b;
+  for(i=0;i<channels.length;i++){
+    c=channels[i];
+    b=document.createElement("div");
+    b.className="channel";
+    b.tabIndex=0;
+    b.innerHTML=(c.name || c.title || c.channel_name || ("Channel "+i));
+    b.onclick=(function(ch){ return function(){ resolveChannel(ch); }; })(c);
+    b.onkeydown=(function(ch){ return function(e){ if(e.keyCode===13 || e.keyCode===32) resolveChannel(ch); }; })(c);
+    list.appendChild(b);
+  }
+}
+
+function resolveChannel(ch){
+  var id = ch.id || ch.channel_id || ch.channelId;
+  if(!id){
+    setStatus("Channel ID not found.");
+    return;
+  }
+  setStatus("Getting stream...");
+  request(API + "/" + encodeURIComponent(id), function(txt){
+    var data;
+    try { data=JSON.parse(txt); } catch(e) {
+      setStatus("Stream API returned invalid JSON.");
+      return;
+    }
+    var url=findPlayable(data);
+    if(url) playUrl(url);
+    else setStatus("No playable HLS URL found for this channel.");
+  }, function(e){ setStatus("Stream error: " + e); });
+}
+
+function findPlayable(o){
+  var i, j;
+  if(!o) return null;
+  if(typeof o.playable === "string") return o.playable;
+  if(typeof o.url === "string" && /\.m3u8(\?|$)/i.test(o.url)) return o.url;
+  if(typeof o.stream_url === "string") return o.stream_url;
+  if(o.servers && o.servers.length){
+    for(i=0;i<o.servers.length;i++){
+      if(typeof o.servers[i].playable === "string") return o.servers[i].playable;
+      if(typeof o.servers[i].url === "string") return o.servers[i].url;
+    }
+  }
+  for(j in o){
+    if(o.hasOwnProperty(j) && typeof o[j] === "object"){
+      var r=findPlayable(o[j]);
+      if(r) return r;
+    }
+  }
+  return null;
+}
+
+function playUrl(url){
+  playerBox.style.display="block";
+  document.getElementById("playstatus").innerHTML="Loading stream...";
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+  video.src=url;
+  video.load();
+  var p=video.play();
+  if(p && p.catch) p.catch(function(){});
+  document.getElementById("playstatus").innerHTML="If the picture does not start, this WebView may not support HLS playback. Try the same URL in an HLS player app.";
+}
+
+function playManual(){
+  var u=document.getElementById("url").value;
+  if(!u){ alert("Paste an HLS URL first."); return; }
+  playUrl(u);
+}
+
+function closePlayer(){
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+  playerBox.style.display="none";
+}
+
+function showManual(){
+  var m=document.getElementById("manual");
+  m.style.display=(m.style.display==="none" ? "block" : "none");
+}
+
+searchChannels();
+</script>
+</body>
+</html>
